@@ -3,16 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>人が動きまわる空間（高コントラスト版）</title>
+  <title>人が動きまわる空間（XP & レベル）</title>
   <style>
     html, body { height: 100%; margin: 0; }
-    body { background:#000; color:#111; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; }
+    body { background:#000; color:#111; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,sans-serif; }
     #game { display:block; width:100vw; height:100vh; outline:none; background:#111; }
     .hud {
-      position: fixed; left: 12px; top: 10px; background: rgba(255,255,255,0.85);
-      color:#111; border-radius: 8px; padding: 8px 10px; font-size: 12px;
-      box-shadow: 0 8px 18px rgba(0,0,0,0.25); user-select: none;
+      position: fixed; left: 12px; top: 10px; background: rgba(255,255,255,0.9);
+      color:#111; border-radius: 10px; padding: 10px 12px; font-size: 12px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.25); user-select: none; min-width: 240px;
     }
+    .bar { height:8px; background:#e5e7eb; border-radius:9999px; overflow:hidden; margin-top:6px; }
+    .fill { height:100%; width:0%; background:#10b981; }
+    .row { display:flex; gap:10px; align-items:center; }
     .pill { display:inline-block; padding:1px 6px; border-radius:9999px; background:#222; color:#fff; }
     .corner { position: fixed; right: 12px; top: 10px; color:#fff; font-size: 12px; background: rgba(0,0,0,0.5); padding: 4px 6px; border-radius: 6px; }
     .tip { position: fixed; left: 12px; bottom: 12px; color:#fff; font-size: 12px; background: rgba(0,0,0,0.5); padding: 6px 8px; border-radius: 6px; }
@@ -23,31 +26,42 @@
 </head>
 <body>
   <canvas id="game" tabindex="0"></canvas>
-  <div class="hud" id="hud"></div>
-  <div class="corner">FPS: <span id="fps">0</span> / <span id="themeName">ダーク</span>（<kbd>L</kbd>切替）</div>
-  <div class="tip">操作: WASD / 方向キー /（スマホは左下スティック）｜壁編集: Shift+クリック</div>
+  <div class="hud">
+    <div class="row"><strong>LV</strong>: <span id="lv" class="pill">1</span> / <strong>XP</strong>: <span id="xpText">0 / 50</span></div>
+    <div class="bar"><div id="xpFill" class="fill"></div></div>
+    <div style="margin-top:6px;">人々: <span id="countPeople" class="pill">0</span>　敵: <span id="countEnemies" class="pill">0</span></div>
+    <div>Shift+クリックで壁編集（PC） / Lで明暗切替</div>
+  </div>
+  <div class="corner">FPS: <span id="fps">0</span> / <span id="themeName">ダーク</span></div>
+  <div class="tip">操作: WASD / 方向キー /（スマホは左下スティック）</div>
   <div class="mobile-joystick" id="joy"><div class="mobile-stick" id="stick"></div></div>
+
 <script>
 (() => {
   // ===== 基本設定 =====
   const TILE = 48, WORLD_W = 50, WORLD_H = 40;
-  const PLAYER_SPEED = 220, NPC_COUNT = 12, NPC_SPEED = 140;
+  const PLAYER_BASE_SPEED = 220;
+  const CITIZEN_COUNT = 10;   // 敵ではない人
+  const ENEMY_COUNT   = 6;    // 敵（赤）
+  const NPC_SPEED = 140;
+  const ENEMY_SPEED = 150;
+
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d', { alpha: false });
-  const hud = document.getElementById('hud');
+
   const fpsLabel = document.getElementById('fps');
   const themeName = document.getElementById('themeName');
+  const lvEl = document.getElementById('lv');
+  const xpText = document.getElementById('xpText');
+  const xpFill = document.getElementById('xpFill');
+  const countPeople = document.getElementById('countPeople');
+  const countEnemies = document.getElementById('countEnemies');
+
   let theme = 'dark'; // 'dark' | 'light'
+  function resize(){ canvas.width=Math.max(1,Math.floor(window.innerWidth)); canvas.height=Math.max(1,Math.floor(window.innerHeight)); }
+  window.addEventListener('resize', resize, {passive:true}); resize();
 
-  // ===== サイズ調整（DPR変換なし） =====
-  function resize() {
-    canvas.width  = Math.max(1, Math.floor(window.innerWidth));
-    canvas.height = Math.max(1, Math.floor(window.innerHeight));
-  }
-  window.addEventListener('resize', resize, {passive:true});
-  resize();
-
-  // ===== マップ生成 =====
+  // ===== マップ =====
   const map = new Uint8Array(WORLD_W * WORLD_H); // 0床 1壁
   const idx = (x,y) => y*WORLD_W + x;
   for (let y=0; y<WORLD_H; y++) for (let x=0; x<WORLD_W; x++) map[idx(x,y)] = (x===0||y===0||x===WORLD_W-1||y===WORLD_H-1) ? 1 : 0;
@@ -62,10 +76,10 @@
   window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
   window.addEventListener('blur', () => keys.clear());
 
-  // ジョイスティック
+  // モバイルジョイスティック
   const joy = document.getElementById('joy'), stick = document.getElementById('stick');
   let joyVec = {x:0,y:0}, joyActive=false, JOY_R=56;
-  function joyPos(e){ const r = joy.getBoundingClientRect(); const c = (e.touches&&e.touches[0])||e; return { x:c.clientX-(r.left+r.width/2), y:c.clientY-(r.top+r.height/2) }; }
+  function joyPos(e){ const r=joy.getBoundingClientRect(); const c=(e.touches&&e.touches[0])||e; return { x:c.clientX-(r.left+r.width/2), y:c.clientY-(r.top+r.height/2) }; }
   function updateJoy(e){ const p=joyPos(e); const len=Math.hypot(p.x,p.y); const cl=Math.min(len,JOY_R); const nx=len? p.x/len:0; const ny=len? p.y/len:0; joyVec.x=(cl/JOY_R)*nx; joyVec.y=(cl/JOY_R)*ny; stick.style.transform=`translate(${nx*cl - 50}%, ${ny*cl - 50}%) translate(-50%,-50%)`; }
   function endJoy(){ joyActive=false; joyVec.x=joyVec.y=0; stick.style.transform='translate(-50%,-50%)'; }
   joy.addEventListener('pointerdown', e=>{ joyActive=true; updateJoy(e); });
@@ -73,12 +87,17 @@
   window.addEventListener('pointerup', endJoy);
   window.addEventListener('pointercancel', endJoy);
 
-  // ===== エンティティ生成 =====
+  // ===== エンティティ =====
   function makeEntity(x,y,r,color,speed){ return {x,y,vx:0,vy:0,r,color,speed,turnTimer:0}; }
-  function spawn(){ while(true){ const tx=Math.floor(Math.random()*WORLD_W), ty=Math.floor(Math.random()*WORLD_H); if(map[idx(tx,ty)]===0) return { x: tx*TILE+TILE*0.5, y: ty*TILE*0.5+TILE*0.5 }; } }
+  function spawn(){ while(true){ const tx=Math.floor(Math.random()*WORLD_W), ty=Math.floor(Math.random()*WORLD_H); if(map[idx(tx,ty)]===0) return { x: tx*TILE+TILE*0.5, y: ty*TILE+TILE*0.5 }; } }
+
   const pSpawn = spawn();
-  const player = makeEntity(pSpawn.x, pSpawn.y, 14, '#00e6ff', PLAYER_SPEED);
-  const npcs = Array.from({length:NPC_COUNT}, _=>{ const s=spawn(); return makeEntity(s.x, s.y, 12, '#ffd400', NPC_SPEED); });
+  const player = makeEntity(pSpawn.x, pSpawn.y, 14, '#00e6ff', PLAYER_BASE_SPEED);
+  let playerLevel = 1, playerXP = 0, xpToNext = 50;
+  let hitCooldown = 0; // 連続ヒット防止
+
+  const citizens = Array.from({length:CITIZEN_COUNT}, _=>{ const s=spawn(); return makeEntity(s.x, s.y, 12, (theme==='dark') ? '#ffd400' : '#2b6cb0', NPC_SPEED); });
+  const enemies  = Array.from({length:ENEMY_COUNT},   _=>{ const s=spawn(); return makeEntity(s.x, s.y, 12, '#ff4d4d', ENEMY_SPEED); });
 
   // ===== コリジョン =====
   function isWallAt(tx,ty){ return tx<0||ty<0||tx>=WORLD_W||ty>=WORLD_H||map[idx(tx,ty)]===1; }
@@ -93,7 +112,20 @@
     ent.x=nx; ent.y=ny;
   }
 
-  // ===== プレイヤー/NPC 更新 =====
+  // ===== XP / レベル =====
+  function gainXP(amount){
+    playerXP += amount;
+    while (playerXP >= xpToNext) {
+      playerXP -= xpToNext;
+      playerLevel += 1;
+      // レベルアップ効果：移動速度+6%、必要XP増加
+      player.speed = PLAYER_BASE_SPEED * (1 + 0.06*(playerLevel-1));
+      xpToNext = Math.round(50 * Math.pow(playerLevel, 1.5));
+    }
+    updateHUD();
+  }
+
+  // ===== 更新 =====
   function updatePlayer(dt){
     let ix = (keys.has('arrowleft')||keys.has('a') ? -1 : 0) + (keys.has('arrowright')||keys.has('d') ? 1 : 0) + joyVec.x;
     let iy = (keys.has('arrowup')||keys.has('w') ? -1 : 0) + (keys.has('arrowdown')||keys.has('s') ? 1 : 0) + joyVec.y;
@@ -103,15 +135,36 @@
     const vlen=Math.hypot(player.vx,player.vy), vmax=player.speed; if(vlen>vmax){ player.vx=player.vx/vlen*vmax; player.vy=player.vy/vlen*vmax; }
     player.vx -= player.vx*damping*dt; player.vy -= player.vy*damping*dt;
     collide(player, dt);
+
+    // 敵との接触（クールダウン付き）
+    if (hitCooldown > 0) hitCooldown -= dt;
+    if (hitCooldown <= 0) {
+      for (const e of enemies) {
+        const dx = e.x - player.x, dy = e.y - player.y;
+        const d = Math.hypot(dx, dy);
+        if (d < e.r + player.r) {
+          // XP獲得→敵をリスポーン→クールダウン
+          gainXP(20 + Math.floor(Math.random()*10)); // 20〜29XP
+          const s = spawn(); e.x=s.x; e.y=s.y; e.vx=0; e.vy=0; e.turnTimer=0;
+          hitCooldown = 0.5; // 0.5秒
+          break;
+        }
+      }
+    }
   }
+
   function rnd(a,b){ return Math.random()*(b-a)+a; }
-  function updateNPC(e,dt){
-    e.turnTimer -= dt;
-    if(e.turnTimer<=0){ const ang=rnd(0,Math.PI*2), sp=e.speed*rnd(0.5,1); e.vx=Math.cos(ang)*sp; e.vy=Math.sin(ang)*sp; e.turnTimer=rnd(1.2,2.4); }
-    const avoid = (o)=>{ const dx=e.x-o.x, dy=e.y-o.y, d=Math.hypot(dx,dy), minDist=e.r+o.r+2; if(d<minDist&&d>0.0001){ const push=(minDist-d)*4; e.vx += (dx/d)*push; e.vy += (dy/d)*push; } };
-    avoid(player); for(const o of npcs) if(o!==e) avoid(o);
-    const vlen=Math.hypot(e.vx,e.vy), vmax=e.speed; if(vlen>vmax){ e.vx=e.vx/vlen*vmax; e.vy=e.vy/vlen*vmax; }
-    collide(e, dt);
+  function wanderUpdate(ent, dt, minTurn=1.2, maxTurn=2.4){
+    ent.turnTimer -= dt;
+    if(ent.turnTimer<=0){ const ang=rnd(0,Math.PI*2), sp=ent.speed*rnd(0.5,1); ent.vx=Math.cos(ang)*sp; ent.vy=Math.sin(ang)*sp; ent.turnTimer=rnd(minTurn,maxTurn); }
+    // 軽い分離
+    const avoid = (o)=>{ const dx=ent.x-o.x, dy=ent.y-o.y, d=Math.hypot(dx,dy), minDist=ent.r+o.r+2; if(d<minDist&&d>0.0001){ const push=(minDist-d)*4; ent.vx += (dx/d)*push; ent.vy += (dy/d)*push; } };
+    for(const o of citizens) if(o!==ent) avoid(o);
+    for(const o of enemies) if(o!==ent) avoid(o);
+    avoid(player);
+    // 上限
+    const vlen=Math.hypot(ent.vx,ent.vy), vmax=ent.speed; if(vlen>vmax){ ent.vx=ent.vx/vlen*vmax; ent.vy=ent.vy/vlen*vmax; }
+    collide(ent, dt);
   }
 
   // ===== カメラ =====
@@ -123,21 +176,19 @@
     camera.x = Math.max(0, Math.min(maxX, camera.x)); camera.y = Math.max(0, Math.min(maxY, camera.y));
   }
 
-  // ===== テーマ切替 =====
-  function toggleTheme(){
-    theme = (theme==='dark') ? 'light' : 'dark';
-    themeName.textContent = theme==='dark' ? 'ダーク' : 'ライト';
-  }
+  // ===== テーマ =====
+  function toggleTheme(){ theme = (theme==='dark') ? 'light' : 'dark'; themeName.textContent = theme==='dark' ? 'ダーク' : 'ライト'; }
 
   // ===== 描画 =====
   function draw(){
+    // 背景
     ctx.fillStyle = (theme==='dark') ? '#111' : '#f5f7fb'; ctx.fillRect(0,0,canvas.width,canvas.height);
 
+    // タイル
     const startX = Math.max(0, Math.floor(camera.x / TILE)-1);
     const startY = Math.max(0, Math.floor(camera.y / TILE)-1);
     const endX   = Math.min(WORLD_W, Math.ceil((camera.x + canvas.width ) / TILE)+1);
     const endY   = Math.min(WORLD_H, Math.ceil((camera.y + canvas.height) / TILE)+1);
-
     for(let ty=startY; ty<endY; ty++){
       for(let tx=startX; tx<endX; tx++){
         const x = Math.floor(tx*TILE - camera.x), y = Math.floor(ty*TILE - camera.y);
@@ -155,43 +206,50 @@
     }
 
     function shadow(e){ const sx=e.x-camera.x, sy=e.y-camera.y+e.r*0.6; ctx.globalAlpha=0.25; ctx.beginPath(); ctx.ellipse(sx,sy,e.r*1.2,e.r*0.6,0,0,Math.PI*2); ctx.fillStyle='#000'; ctx.fill(); ctx.globalAlpha=1; }
-    // 影
-    // for NPC
-    // eslint-disable-next-line
-    for(const e of npcs) shadow(e); shadow(player);
+    for(const e of citizens) shadow(e); for(const e of enemies) shadow(e); shadow(player);
 
-    // NPC
-    for(const e of npcs){
+    // 市民（黄色/青）
+    for(const e of citizens){
       const sx=e.x-camera.x, sy=e.y-camera.y;
       ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2);
       ctx.fillStyle = (theme==='dark') ? '#ffd400' : '#2b6cb0';
       ctx.fill();
       ctx.beginPath(); ctx.arc(sx + (e.vx*0.03), sy + (e.vy*0.03), 4, 0, Math.PI*2);
-      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff';
-      ctx.fill();
+      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff'; ctx.fill();
     }
 
-    // プレイヤー
+    // 敵（赤）
+    for(const e of enemies){
+      const sx=e.x-camera.x, sy=e.y-camera.y;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2);
+      ctx.fillStyle = '#ff4d4d'; ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + (e.vx*0.03), sy + (e.vy*0.03), 4, 0, Math.PI*2);
+      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff'; ctx.fill();
+    }
+
+    // プレイヤー（シアン）
     { const e=player; const sx=e.x-camera.x, sy=e.y-camera.y;
       ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2);
-      ctx.fillStyle = (theme==='dark') ? '#00e6ff' : '#1a202c';
-      ctx.fill();
+      ctx.fillStyle = (theme==='dark') ? '#00e6ff' : '#1a202c'; ctx.fill();
       ctx.beginPath(); ctx.arc(sx + (e.vx*0.03), sy + (e.vy*0.03), 5, 0, Math.PI*2);
-      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff';
-      ctx.fill();
+      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff'; ctx.fill();
     }
-
-    hud.innerHTML = `
-      <div><strong>人</strong>：<span class="pill">${1+npcs.length}</span>&nbsp;&nbsp;<strong>タイル</strong>：${WORLD_W}×${WORLD_H}</div>
-      <div>Shift + クリックで壁のオン/オフ（赤が壁）</div>
-      <div>テーマ切替：<kbd>L</kbd></div>
-    `;
   }
+
+  // ===== HUD =====
+  function updateHUD(){
+    lvEl.textContent = String(playerLevel);
+    xpText.textContent = `${playerXP} / ${xpToNext}`;
+    xpFill.style.width = `${Math.min(100, Math.round(playerXP/xpToNext*100))}%`;
+    countPeople.textContent = String(1 + citizens.length); // プレイヤー含む「人」
+    countEnemies.textContent = String(enemies.length);
+  }
+  updateHUD();
 
   // ===== 壁編集 =====
   let shift=false;
-  window.addEventListener('keydown', e=>{ if(e.key==='Shift') shift=true; });
-  window.addEventListener('keyup', e=>{ if(e.key==='Shift') shift=false; });
+  window.addEventListener('keydown', e=>{ if(e.key==='shift') shift=true; });
+  window.addEventListener('keyup', e=>{ if(e.key==='shift') shift=false; });
   canvas.addEventListener('pointerdown', e=>{
     if(!shift) return;
     const rect = canvas.getBoundingClientRect();
@@ -205,8 +263,14 @@
   let last=performance.now(), frames=0, elapsed=0;
   function loop(now){
     const dt = Math.min(0.033, (now-last)/1000); last=now;
-    updatePlayer(dt); for(const e of npcs) updateNPC(e, dt);
-    updateCamera(dt); draw();
+    // 更新
+    updatePlayer(dt);
+    for(const e of citizens) wanderUpdate(e, dt);
+    for(const e of enemies)  wanderUpdate(e, dt, 0.8, 1.8); // 敵は少し方向転換早め
+    updateCamera(dt);
+    // 描画
+    draw();
+    // FPS
     frames++; elapsed += dt; if(elapsed>=0.5){ fpsLabel.textContent = Math.round(frames/elapsed).toString(); frames=0; elapsed=0; }
     requestAnimationFrame(loop);
   }
