@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>人が動きまわる空間（高コントラスト版）</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background:#000; color:#111; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; }
+    #game { display:block; width:100vw; height:100vh; outline:none; background:#111; }
+    .hud {
+      position: fixed; left: 12px; top: 10px; background: rgba(255,255,255,0.85);
+      color:#111; border-radius: 8px; padding: 8px 10px; font-size: 12px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.25); user-select: none;
+    }
+    .pill { display:inline-block; padding:1px 6px; border-radius:9999px; background:#222; color:#fff; }
+    .corner { position: fixed; right: 12px; top: 10px; color:#fff; font-size: 12px; background: rgba(0,0,0,0.5); padding: 4px 6px; border-radius: 6px; }
+    .tip { position: fixed; left: 12px; bottom: 12px; color:#fff; font-size: 12px; background: rgba(0,0,0,0.5); padding: 6px 8px; border-radius: 6px; }
+    .mobile-joystick { position: fixed; left: 18px; bottom: 18px; width: 128px; height: 128px; border-radius: 50%; background: rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.25); display:none; touch-action:none; }
+    .mobile-stick { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; transform: translate(-50%, -50%); border-radius: 50%; background: rgba(255,255,255,0.75); border:1px solid rgba(255,255,255,0.35); touch-action:none; }
+    @media (hover:none) and (pointer:coarse) { .mobile-joystick { display:block; } }
+  </style>
+</head>
+<body>
+  <canvas id="game" tabindex="0"></canvas>
+  <div class="hud" id="hud"></div>
+  <div class="corner">FPS: <span id="fps">0</span> / <span id="themeName">ダーク</span>（<kbd>L</kbd>切替）</div>
+  <div class="tip">操作: WASD / 方向キー /（スマホは左下スティック）｜壁編集: Shift+クリック</div>
+  <div class="mobile-joystick" id="joy"><div class="mobile-stick" id="stick"></div></div>
+<script>
+(() => {
+  // ===== 基本設定 =====
+  const TILE = 48, WORLD_W = 50, WORLD_H = 40;
+  const PLAYER_SPEED = 220, NPC_COUNT = 12, NPC_SPEED = 140;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const hud = document.getElementById('hud');
+  const fpsLabel = document.getElementById('fps');
+  const themeName = document.getElementById('themeName');
+  let theme = 'dark'; // 'dark' | 'light'
+
+  // ===== サイズ調整（DPR変換なし） =====
+  function resize() {
+    canvas.width  = Math.max(1, Math.floor(window.innerWidth));
+    canvas.height = Math.max(1, Math.floor(window.innerHeight));
+  }
+  window.addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // ===== マップ生成 =====
+  const map = new Uint8Array(WORLD_W * WORLD_H); // 0床 1壁
+  const idx = (x,y) => y*WORLD_W + x;
+  for (let y=0; y<WORLD_H; y++) for (let x=0; x<WORLD_W; x++) map[idx(x,y)] = (x===0||y===0||x===WORLD_W-1||y===WORLD_H-1) ? 1 : 0;
+  function addBlock(x0,y0,w,h){ for(let y=0;y<h;y++) for(let x=0;x<w;x++){ if(x0+x>0&&y0+y>0&&x0+x<WORLD_W-1&&y0+y<WORLD_H-1) map[idx(x0+x,y0+y)] = 1; } }
+  addBlock(8,6,10,1); addBlock(18,6,1,10); addBlock(8,16,11,1);
+  addBlock(28,10,12,1); addBlock(28,10,1,10); addBlock(32,20,10,1);
+  addBlock(12,24,14,1); addBlock(12,24,1,8); addBlock(20,28,16,1); addBlock(20,28,1,8);
+
+  // ===== 入力 =====
+  const keys = new Set();
+  window.addEventListener('keydown', e => { keys.add(e.key.toLowerCase()); if (e.key.toLowerCase()==='l') toggleTheme(); });
+  window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener('blur', () => keys.clear());
+
+  // ジョイスティック
+  const joy = document.getElementById('joy'), stick = document.getElementById('stick');
+  let joyVec = {x:0,y:0}, joyActive=false, JOY_R=56;
+  function joyPos(e){ const r = joy.getBoundingClientRect(); const c = (e.touches&&e.touches[0])||e; return { x:c.clientX-(r.left+r.width/2), y:c.clientY-(r.top+r.height/2) }; }
+  function updateJoy(e){ const p=joyPos(e); const len=Math.hypot(p.x,p.y); const cl=Math.min(len,JOY_R); const nx=len? p.x/len:0; const ny=len? p.y/len:0; joyVec.x=(cl/JOY_R)*nx; joyVec.y=(cl/JOY_R)*ny; stick.style.transform=`translate(${nx*cl - 50}%, ${ny*cl - 50}%) translate(-50%,-50%)`; }
+  function endJoy(){ joyActive=false; joyVec.x=joyVec.y=0; stick.style.transform='translate(-50%,-50%)'; }
+  joy.addEventListener('pointerdown', e=>{ joyActive=true; updateJoy(e); });
+  window.addEventListener('pointermove', e=>{ if(joyActive) updateJoy(e); });
+  window.addEventListener('pointerup', endJoy);
+  window.addEventListener('pointercancel', endJoy);
+
+  // ===== エンティティ生成 =====
+  function makeEntity(x,y,r,color,speed){ return {x,y,vx:0,vy:0,r,color,speed,turnTimer:0}; }
+  function spawn(){ while(true){ const tx=Math.floor(Math.random()*WORLD_W), ty=Math.floor(Math.random()*WORLD_H); if(map[idx(tx,ty)]===0) return { x: tx*TILE+TILE*0.5, y: ty*TILE*0.5+TILE*0.5 }; } }
+  const pSpawn = spawn();
+  const player = makeEntity(pSpawn.x, pSpawn.y, 14, '#00e6ff', PLAYER_SPEED);
+  const npcs = Array.from({length:NPC_COUNT}, _=>{ const s=spawn(); return makeEntity(s.x, s.y, 12, '#ffd400', NPC_SPEED); });
+
+  // ===== コリジョン =====
+  function isWallAt(tx,ty){ return tx<0||ty<0||tx>=WORLD_W||ty>=WORLD_H||map[idx(tx,ty)]===1; }
+  function collide(ent, dt){
+    let nx=ent.x+ent.vx*dt, ny=ent.y+ent.vy*dt, r=ent.r;
+    if(ent.vx!==0){ const sign=Math.sign(ent.vx); const edgeX=nx+sign*r; const tx=Math.floor(edgeX/TILE);
+      const top=Math.floor((ent.y-r)/TILE), bottom=Math.floor((ent.y+r)/TILE);
+      for(let ty=top; ty<=bottom; ty++){ if(isWallAt(tx,ty)){ nx = sign>0 ? tx*TILE - r - 0.01 : (tx+1)*TILE + r + 0.01; ent.vx=0; break; } } }
+    if(ent.vy!==0){ const sign=Math.sign(ent.vy); const edgeY=ny+sign*r; const ty=Math.floor(edgeY/TILE);
+      const left=Math.floor((nx-r)/TILE), right=Math.floor((nx+r)/TILE);
+      for(let tx=left; tx<=right; tx++){ if(isWallAt(tx,ty)){ ny = sign>0 ? ty*TILE - r - 0.01 : (ty+1)*TILE + r + 0.01; ent.vy=0; break; } } }
+    ent.x=nx; ent.y=ny;
+  }
+
+  // ===== プレイヤー/NPC 更新 =====
+  function updatePlayer(dt){
+    let ix = (keys.has('arrowleft')||keys.has('a') ? -1 : 0) + (keys.has('arrowright')||keys.has('d') ? 1 : 0) + joyVec.x;
+    let iy = (keys.has('arrowup')||keys.has('w') ? -1 : 0) + (keys.has('arrowdown')||keys.has('s') ? 1 : 0) + joyVec.y;
+    const len=Math.hypot(ix,iy); if(len>1){ ix/=len; iy/=len; }
+    const accel = player.speed*6, damping = 8;
+    player.vx += ix*accel*dt; player.vy += iy*accel*dt;
+    const vlen=Math.hypot(player.vx,player.vy), vmax=player.speed; if(vlen>vmax){ player.vx=player.vx/vlen*vmax; player.vy=player.vy/vlen*vmax; }
+    player.vx -= player.vx*damping*dt; player.vy -= player.vy*damping*dt;
+    collide(player, dt);
+  }
+  function rnd(a,b){ return Math.random()*(b-a)+a; }
+  function updateNPC(e,dt){
+    e.turnTimer -= dt;
+    if(e.turnTimer<=0){ const ang=rnd(0,Math.PI*2), sp=e.speed*rnd(0.5,1); e.vx=Math.cos(ang)*sp; e.vy=Math.sin(ang)*sp; e.turnTimer=rnd(1.2,2.4); }
+    const avoid = (o)=>{ const dx=e.x-o.x, dy=e.y-o.y, d=Math.hypot(dx,dy), minDist=e.r+o.r+2; if(d<minDist&&d>0.0001){ const push=(minDist-d)*4; e.vx += (dx/d)*push; e.vy += (dy/d)*push; } };
+    avoid(player); for(const o of npcs) if(o!==e) avoid(o);
+    const vlen=Math.hypot(e.vx,e.vy), vmax=e.speed; if(vlen>vmax){ e.vx=e.vx/vlen*vmax; e.vy=e.vy/vlen*vmax; }
+    collide(e, dt);
+  }
+
+  // ===== カメラ =====
+  const camera = {x:0,y:0};
+  function updateCamera(dt){
+    const targetX = player.x - canvas.width/2, targetY = player.y - canvas.height/2;
+    const smooth=8; camera.x += (targetX-camera.x)*Math.min(1,smooth*dt); camera.y += (targetY-camera.y)*Math.min(1,smooth*dt);
+    const maxX= WORLD_W*TILE - canvas.width, maxY = WORLD_H*TILE - canvas.height;
+    camera.x = Math.max(0, Math.min(maxX, camera.x)); camera.y = Math.max(0, Math.min(maxY, camera.y));
+  }
+
+  // ===== テーマ切替 =====
+  function toggleTheme(){
+    theme = (theme==='dark') ? 'light' : 'dark';
+    themeName.textContent = theme==='dark' ? 'ダーク' : 'ライト';
+  }
+
+  // ===== 描画 =====
+  function draw(){
+    ctx.fillStyle = (theme==='dark') ? '#111' : '#f5f7fb'; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const startX = Math.max(0, Math.floor(camera.x / TILE)-1);
+    const startY = Math.max(0, Math.floor(camera.y / TILE)-1);
+    const endX   = Math.min(WORLD_W, Math.ceil((camera.x + canvas.width ) / TILE)+1);
+    const endY   = Math.min(WORLD_H, Math.ceil((camera.y + canvas.height) / TILE)+1);
+
+    for(let ty=startY; ty<endY; ty++){
+      for(let tx=startX; tx<endX; tx++){
+        const x = Math.floor(tx*TILE - camera.x), y = Math.floor(ty*TILE - camera.y);
+        const wall = map[idx(tx,ty)]===1;
+        if(!wall){
+          ctx.fillStyle = (theme==='dark')
+            ? (((tx+ty)&1) ? '#2c2f36' : '#252830')
+            : (((tx+ty)&1) ? '#e2e8f0' : '#edf2f7');
+          ctx.fillRect(x,y,TILE,TILE);
+        } else {
+          ctx.fillStyle = (theme==='dark') ? '#ff4d4d' : '#cc0000';
+          ctx.fillRect(x,y,TILE,TILE);
+        }
+      }
+    }
+
+    function shadow(e){ const sx=e.x-camera.x, sy=e.y-camera.y+e.r*0.6; ctx.globalAlpha=0.25; ctx.beginPath(); ctx.ellipse(sx,sy,e.r*1.2,e.r*0.6,0,0,Math.PI*2); ctx.fillStyle='#000'; ctx.fill(); ctx.globalAlpha=1; }
+    // 影
+    // for NPC
+    // eslint-disable-next-line
+    for(const e of npcs) shadow(e); shadow(player);
+
+    // NPC
+    for(const e of npcs){
+      const sx=e.x-camera.x, sy=e.y-camera.y;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2);
+      ctx.fillStyle = (theme==='dark') ? '#ffd400' : '#2b6cb0';
+      ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + (e.vx*0.03), sy + (e.vy*0.03), 4, 0, Math.PI*2);
+      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff';
+      ctx.fill();
+    }
+
+    // プレイヤー
+    { const e=player; const sx=e.x-camera.x, sy=e.y-camera.y;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2);
+      ctx.fillStyle = (theme==='dark') ? '#00e6ff' : '#1a202c';
+      ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + (e.vx*0.03), sy + (e.vy*0.03), 5, 0, Math.PI*2);
+      ctx.fillStyle = (theme==='dark') ? '#111' : '#fff';
+      ctx.fill();
+    }
+
+    hud.innerHTML = `
+      <div><strong>人</strong>：<span class="pill">${1+npcs.length}</span>&nbsp;&nbsp;<strong>タイル</strong>：${WORLD_W}×${WORLD_H}</div>
+      <div>Shift + クリックで壁のオン/オフ（赤が壁）</div>
+      <div>テーマ切替：<kbd>L</kbd></div>
+    `;
+  }
+
+  // ===== 壁編集 =====
+  let shift=false;
+  window.addEventListener('keydown', e=>{ if(e.key==='Shift') shift=true; });
+  window.addEventListener('keyup', e=>{ if(e.key==='Shift') shift=false; });
+  canvas.addEventListener('pointerdown', e=>{
+    if(!shift) return;
+    const rect = canvas.getBoundingClientRect();
+    const gx = e.clientX - rect.left + camera.x;
+    const gy = e.clientY - rect.top  + camera.y;
+    const tx = Math.floor(gx / TILE), ty = Math.floor(gy / TILE);
+    if (tx>0 && ty>0 && tx<WORLD_W-1 && ty<WORLD_H-1) map[idx(tx,ty)] = map[idx(tx,ty)] ? 0 : 1;
+  });
+
+  // ===== ループ =====
+  let last=performance.now(), frames=0, elapsed=0;
+  function loop(now){
+    const dt = Math.min(0.033, (now-last)/1000); last=now;
+    updatePlayer(dt); for(const e of npcs) updateNPC(e, dt);
+    updateCamera(dt); draw();
+    frames++; elapsed += dt; if(elapsed>=0.5){ fpsLabel.textContent = Math.round(frames/elapsed).toString(); frames=0; elapsed=0; }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  canvas.focus();
+})();
+</script>
+</body>
+</html>
